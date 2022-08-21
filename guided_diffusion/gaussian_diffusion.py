@@ -851,6 +851,8 @@ class GaussianDiffusion:
         init_image=None,
         randomize_class=False,
         cond_fn_with_grad=False,
+        mask=None,
+        inpainting_stop=None
     ):
         """
         Use DDIM to sample from the model and yield intermediate samples from
@@ -862,26 +864,37 @@ class GaussianDiffusion:
             device = next(model.parameters()).device
         assert isinstance(shape, (tuple, list))
         if noise is not None:
-            img = noise
+            img_noise = noise
         else:
-            img = th.randn(*shape, device=device)
+            img_noise = th.randn(*shape, device=device)
 
         if skip_timesteps and init_image is None:
-            init_image = th.zeros_like(img)
+            init_image = th.zeros_like(img_noise)
 
         indices = list(range(self.num_timesteps - skip_timesteps))[::-1]
-
+        if inpainting_stop==None: inpainting_stop = indices[-1]-1
+        img = img_noise
         if init_image is not None:
             my_t = th.ones([shape[0]], device=device, dtype=th.long) * indices[0]
-            img = self.q_sample(init_image, my_t, img)
+            img = self.q_sample(init_image, my_t, img_noise)
+        if mask is not None: 
+          mask = th.from_numpy(mask).to(device).permute((2,0,1))[None,...].float()
+          mask = th.nn.functional.interpolate(mask, size=(img.shape[2],img.shape[3]))
 
         if progress:
             # Lazy import so that we don't depend on tqdm.
             from tqdm.auto import tqdm
 
             indices = tqdm(indices)
+        
+
 
         for i in indices:
+            if i>=inpainting_stop and init_image is not None and mask is not None:
+                my_t = th.ones([shape[0]], device=device, dtype=th.long) * i
+                img_init_renoised = self.q_sample(init_image, my_t, img_noise)
+                img = img*(1-mask) + (mask)*img_init_renoised
+
             t = th.tensor([i] * shape[0], device=device)
             if randomize_class and 'y' in model_kwargs:
                 model_kwargs['y'] = th.randint(low=0, high=model.num_classes,
@@ -1044,6 +1057,8 @@ class GaussianDiffusion:
         randomize_class=False,
         cond_fn_with_grad=False,
         order=2,
+        mask=None,
+        inpainting_stop=None
     ):
         """
         Use PLMS to sample from the model and yield intermediate samples from each
@@ -1055,18 +1070,23 @@ class GaussianDiffusion:
             device = next(model.parameters()).device
         assert isinstance(shape, (tuple, list))
         if noise is not None:
-            img = noise
+            img_noise = noise
         else:
-            img = th.randn(*shape, device=device)
+            img_noise = th.randn(*shape, device=device)
 
         if skip_timesteps and init_image is None:
-            init_image = th.zeros_like(img)
+            init_image = th.zeros_like(img_noise)
 
         indices = list(range(self.num_timesteps - skip_timesteps))[::-1]
+        if inpainting_stop==None: inpainting_stop = indices[-1]-1
+        img = img_noise
 
         if init_image is not None:
             my_t = th.ones([shape[0]], device=device, dtype=th.long) * indices[0]
-            img = self.q_sample(init_image, my_t, img)
+            img = self.q_sample(init_image, my_t, img_noise)
+        if mask is not None: 
+            mask = th.from_numpy(mask).to(device).permute((2,0,1))[None,...].float()
+            mask = th.nn.functional.interpolate(mask, size=(img.shape[2],img.shape[3]))
 
         if progress:
             # Lazy import so that we don't depend on tqdm.
@@ -1077,6 +1097,11 @@ class GaussianDiffusion:
         old_out = None
 
         for i in indices:
+            if i>=inpainting_stop and init_image is not None and mask is not None:
+                my_t = th.ones([shape[0]], device=device, dtype=th.long) * i
+                img_init_renoised = self.q_sample(init_image, my_t, img_noise)
+                img = img*(1-mask) + (mask)*img_init_renoised
+
             t = th.tensor([i] * shape[0], device=device)
             if randomize_class and 'y' in model_kwargs:
                 model_kwargs['y'] = th.randint(low=0, high=model.num_classes,
