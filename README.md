@@ -11,6 +11,9 @@ This is a QOL fork made for training guided-diffusion models on google colab (an
 
 ## Changelog
 
+### 21.08.2022
+- Add lots of stuff from https://github.com/crowsonkb/guided-diffusion to be sure it works inside DD
+
 ### 19.05.2022
 - Add colab 
 
