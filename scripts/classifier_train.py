@@ -1,9 +1,11 @@
 """
-Train a noised image classifier on ImageNet.
+Train a noised image classifier on ImageNet with Entropy-Constraint Training (ECT)
+and Mutual Information regularization.
 """
 
 import argparse
 import os
+import sys
 
 import blobfile as bf
 import torch as th
@@ -23,6 +25,73 @@ from guided_diffusion.script_util import (
     create_classifier_and_diffusion,
 )
 from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
+
+# Import the losses module - adjust path as needed
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from losses import get_loss
+
+
+def compute_entropy(probs, entropy_type='renyi', alpha=2.0):
+    """Compute entropy of probability distribution."""
+    # Add small epsilon for numerical stability
+    probs = probs + 1e-8
+    
+    if entropy_type == 'renyi':
+        if abs(alpha - 1.0) < 1e-6:
+            # Shannon entropy (limit case)
+            return -(probs * th.log(probs)).sum(dim=-1)
+        else:
+            # Rényi entropy
+            return (1.0 / (1.0 - alpha)) * th.log((probs ** alpha).sum(dim=-1))
+    
+    elif entropy_type == 'tsallis':
+        q = alpha  # Using alpha parameter as q for Tsallis
+        if abs(q - 1.0) < 1e-6:
+            # Shannon entropy (limit case)
+            return -(probs * th.log(probs)).sum(dim=-1)
+        else:
+            # Tsallis entropy
+            return (1.0 / (q - 1.0)) * (1.0 - (probs ** q).sum(dim=-1))
+    
+    elif entropy_type == 'min':
+        # Min-entropy
+        return -th.log(probs.max(dim=-1)[0])
+    
+    elif entropy_type == 'collision':
+        # Collision entropy (Rényi entropy with α=2)
+        return -th.log((probs ** 2).sum(dim=-1))
+    
+    else:
+        # Default to Shannon entropy
+        return -(probs * th.log(probs)).sum(dim=-1)
+
+
+def compute_mi_regularization(logits, targets, divergence_name='JS', divergence_params=None):
+    """
+    Compute mutual information regularization using f-divergence.
+    
+    This approximates the MI regularization term D_f[p(x,z)||p(x)p(z)]
+    by treating the classifier's hidden representations as latent variables.
+    """
+    # For simplicity, we use the logits themselves as a proxy for latent representations
+    # In practice, you might want to extract actual hidden layer features
+    
+    batch_size = logits.shape[0]
+    n_classes = logits.shape[1]
+    
+    # Compute marginal distributions
+    # p(z) ≈ average over batch
+    marginal_logits = logits.mean(dim=0, keepdim=True).expand(batch_size, -1)
+    
+    # Get the divergence loss function
+    div_loss = get_loss(divergence_name, param=divergence_params, nclass=n_classes,
+                       softmax_logits=True, softmax_gt=False)
+    
+    # Compute divergence between joint and product of marginals
+    # This encourages the model to use the latent information
+    mi_loss = div_loss(logits, marginal_logits.detach())
+    
+    return mi_loss
 
 
 def main():
@@ -99,7 +168,17 @@ def main():
             dist_util.load_state_dict(opt_checkpoint, map_location=dist_util.dev())
         )
 
-    logger.log("training classifier model...")
+    # Initialize ECT loss
+    num_classes = model.module.out_channels if hasattr(model, 'module') else model.out_channels
+    ect_loss_fn = get_loss(
+        args.ect_divergence, 
+        param=args.divergence_params,
+        nclass=num_classes,
+        softmax_logits=True,
+        softmax_gt=False
+    )
+
+    logger.log("training classifier model with ECT...")
 
     def forward_backward_log(data_loader, prefix="train"):
         batch, extra = next(data_loader)
@@ -117,19 +196,47 @@ def main():
             split_microbatches(args.microbatch, batch, labels, t)
         ):
             logits = model(sub_batch, timesteps=sub_t)
-            loss = F.cross_entropy(logits, sub_labels, reduction="none")
+            
+            # Standard cross-entropy loss
+            ce_loss = F.cross_entropy(logits, sub_labels, reduction="none")
+            
+            # Compute ECT loss
+            probs = F.softmax(logits, dim=-1)
+            uniform_dist = th.ones_like(probs) / num_classes
+            ect_loss = ect_loss_fn(probs, uniform_dist)
+            
+            # Compute MI regularization if enabled
+            mi_loss = th.tensor(0.0).to(dist_util.dev())
+            if args.mi_weight > 0:
+                mi_loss = compute_mi_regularization(
+                    logits, sub_labels, 
+                    divergence_name=args.mi_divergence,
+                    divergence_params=args.divergence_params
+                )
+            
+            # Total loss
+            total_loss = ce_loss + args.ect_weight * ect_loss + args.mi_weight * mi_loss
 
             losses = {}
-            losses[f"{prefix}_loss"] = loss.detach()
+            losses[f"{prefix}_loss"] = ce_loss.detach().mean()
+            losses[f"{prefix}_ect_loss"] = ect_loss.detach()
+            losses[f"{prefix}_mi_loss"] = mi_loss.detach()
+            losses[f"{prefix}_total_loss"] = total_loss.detach().mean()
             losses[f"{prefix}_acc@1"] = compute_top_k(
                 logits, sub_labels, k=1, reduction="none"
-            )
+            ).mean()
             losses[f"{prefix}_acc@5"] = compute_top_k(
                 logits, sub_labels, k=5, reduction="none"
-            )
+            ).mean()
+            
+            # Log entropy of predictions
+            entropy = compute_entropy(probs, entropy_type=args.entropy_type, alpha=args.entropy_alpha)
+            losses[f"{prefix}_entropy"] = entropy.detach().mean()
+            
             log_loss_dict(diffusion, sub_t, losses)
             del losses
-            loss = loss.mean()
+            
+            loss = total_loss.mean()
             if loss.requires_grad:
                 if i == 0:
                     mp_trainer.zero_grad()
@@ -215,10 +322,26 @@ def create_argparser():
         log_interval=10,
         eval_interval=5,
         save_interval=10000,
+        # ECT parameters
+        ect_weight=0.1,
+        ect_divergence="JS",  # Options: KL, JS, Hellinger, etc.
+        # MI regularization parameters
+        mi_weight=0.01,
+        mi_divergence="JS",
+        # Entropy parameters
+        entropy_type="renyi",  # Options: renyi, tsallis, min, collision
+        entropy_alpha=2.0,
+        # General divergence parameters
+        divergence_params=None,  # Will be parsed as list of floats
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
+    
+    # Custom parsing for divergence_params
+    parser.add_argument('--divergence_params', nargs='+', type=float, 
+                       help='Parameters for divergence measures')
+    
     return parser
 
 
