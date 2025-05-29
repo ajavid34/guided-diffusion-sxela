@@ -331,7 +331,7 @@ class fDivergence(BaseDivergence):
 
     def __init__(self, nclass: int, param: Optional[List[float]] = None,
                  softmax_logits: bool = True, softmax_gt: bool = True,
-                 f_func: Optional[Callable] = None):
+                 f_func: Optional[callable] = None):
         super(fDivergence, self).__init__(nclass, param, softmax_logits, softmax_gt)
         # Default to KL-divergence if no function provided
         self.f_func = f_func if f_func is not None else lambda x: x * torch.log(x) - x + 1
