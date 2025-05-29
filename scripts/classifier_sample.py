@@ -156,8 +156,11 @@ def main():
             return grad * args.classifier_scale
 
     def model_fn(x, t, y=None):
-        assert y is not None
-        return model(x, t, y if args.class_cond else None)
+        # For unconditional diffusion models, don't pass y
+        if args.class_cond and y is not None:
+            return model(x, t, y)
+        else:
+            return model(x, t)
 
     logger.log("sampling with Entropy-Driven Sampling..." if args.use_eds else "sampling...")
     all_images = []
