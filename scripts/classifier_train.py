@@ -282,7 +282,15 @@ def main():
     if dist.get_rank() == 0:
         logger.log("saving model...")
         save_model(mp_trainer, opt, step + resume_step)
+    
+    # Ensure all processes wait before cleanup
     dist.barrier()
+    
+    # Properly cleanup distributed training
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    
+    logger.log("Training completed successfully!")
 
 
 def set_annealed_lr(opt, base_lr, frac_done):
@@ -293,11 +301,19 @@ def set_annealed_lr(opt, base_lr, frac_done):
 
 def save_model(mp_trainer, opt, step):
     if dist.get_rank() == 0:
+        save_dir = logger.get_dir()
+        os.makedirs(save_dir, exist_ok=True)
+        
+        model_path = os.path.join(save_dir, f"model{step:06d}.pt")
+        opt_path = os.path.join(save_dir, f"opt{step:06d}.pt")
+        
+        logger.log(f"Saving model to {model_path}")
         th.save(
             mp_trainer.master_params_to_state_dict(mp_trainer.master_params),
-            os.path.join(logger.get_dir(), f"model{step:06d}.pt"),
+            model_path
         )
-        th.save(opt.state_dict(), os.path.join(logger.get_dir(), f"opt{step:06d}.pt"))
+        th.save(opt.state_dict(), opt_path)
+        logger.log("Model saved successfully!")
 
 
 def compute_top_k(logits, labels, k, reduction="mean"):
