@@ -27,8 +27,16 @@ from guided_diffusion.script_util import (
 from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
 
 # Import the losses module - adjust path as needed
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from losses import get_loss
+# Try multiple possible locations for the losses module
+try:
+    from losses import get_loss
+except ImportError:
+    try:
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from losses import get_loss
+    except ImportError:
+        sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+        from losses import get_loss
 
 
 def compute_entropy(probs, entropy_type='renyi', alpha=2.0):
@@ -218,22 +226,25 @@ def main():
             total_loss = ce_loss + args.ect_weight * ect_loss + args.mi_weight * mi_loss
 
             losses = {}
-            losses[f"{prefix}_loss"] = ce_loss.detach().mean()
-            losses[f"{prefix}_ect_loss"] = ect_loss.detach()
-            losses[f"{prefix}_mi_loss"] = mi_loss.detach()
-            losses[f"{prefix}_total_loss"] = total_loss.detach().mean()
+            losses[f"{prefix}_loss"] = ce_loss.detach()
             losses[f"{prefix}_acc@1"] = compute_top_k(
                 logits, sub_labels, k=1, reduction="none"
-            ).mean()
+            )
             losses[f"{prefix}_acc@5"] = compute_top_k(
                 logits, sub_labels, k=5, reduction="none"
-            ).mean()
+            )
+            
+            # Log timestep-dependent losses for log_loss_dict
+            log_loss_dict(diffusion, sub_t, losses)
+            
+            # Log scalar losses separately
+            logger.logkv(f"{prefix}_ect_loss", ect_loss.detach().mean().item())
+            logger.logkv(f"{prefix}_mi_loss", mi_loss.detach().mean().item())
+            logger.logkv(f"{prefix}_total_loss", total_loss.detach().mean().item())
             
             # Log entropy of predictions
             entropy = compute_entropy(probs, entropy_type=args.entropy_type, alpha=args.entropy_alpha)
-            losses[f"{prefix}_entropy"] = entropy.detach().mean()
-            
-            log_loss_dict(diffusion, sub_t, losses)
+            logger.logkv(f"{prefix}_entropy", entropy.detach().mean().item())
             del losses
             
             loss = total_loss.mean()
@@ -331,15 +342,13 @@ def create_argparser():
         # Entropy parameters
         entropy_type="renyi",  # Options: renyi, tsallis, min, collision
         entropy_alpha=2.0,
-        # General divergence parameters
-        divergence_params=None,  # Will be parsed as list of floats
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
     
-    # Custom parsing for divergence_params
-    parser.add_argument('--divergence_params', nargs='+', type=float, 
+    # Custom parsing for divergence_params (not in defaults to avoid conflict)
+    parser.add_argument('--divergence_params', nargs='+', type=float, default=None,
                        help='Parameters for divergence measures')
     
     return parser
