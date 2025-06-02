@@ -5,4 +5,7 @@ datasets/
 models/
 output/
 *.egg-info/
-run.ipynb
+run.ipynb.idea/
+.idea/*
+.idea/
+.idea/
