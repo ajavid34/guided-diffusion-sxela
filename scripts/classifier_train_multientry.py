@@ -4,8 +4,6 @@ Train a noised image classifier on ImageNet with multiple entropy options.
 
 import argparse
 import os
-import sys
-sys.path.append('.')  # Add current directory to path
 
 import blobfile as bf
 import numpy as np
@@ -29,9 +27,6 @@ from guided_diffusion.script_util import (
 )
 from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
 
-# Import the losses module
-from losses import get_loss
-
 
 def compute_entropy_loss(logits, entropy_type, entropy_params=None, num_classes=1000):
     """
@@ -44,7 +39,7 @@ def compute_entropy_loss(logits, entropy_type, entropy_params=None, num_classes=
         num_classes: Number of classes
     
     Returns:
-        Entropy loss value
+        Entropy loss value (B,) - one value per sample
     """
     batch_size = logits.shape[0]
     device = logits.device
@@ -57,34 +52,40 @@ def compute_entropy_loss(logits, entropy_type, entropy_params=None, num_classes=
         return entropy
     
     elif entropy_type == "tsallis":
-        # Tsallis entropy using divergence from uniform
+        # Tsallis entropy 
         alpha = entropy_params[0] if entropy_params else 2.0
-        uniform = th.ones_like(logits) / num_classes
-        divergence = get_loss("Tsallis", param=[0, alpha], nclass=num_classes, 
-                            softmax_logits=True, softmax_gt=False)
-        # Tsallis entropy is related to divergence from uniform
-        return -divergence(logits, uniform)
+        probs = F.softmax(logits, dim=-1)
+        if abs(alpha - 1.0) < 1e-6:
+            # Use Shannon entropy for α ≈ 1
+            log_probs = F.log_softmax(logits, dim=-1)
+            return -(probs * log_probs).sum(dim=-1)
+        else:
+            # Tsallis entropy: (1 - sum(p^α)) / (α - 1)
+            return (1.0 - (probs.pow(alpha)).sum(dim=-1)) / (alpha - 1.0)
     
     elif entropy_type == "renyi":
-        # Rényi entropy using divergence from uniform
+        # Rényi entropy
         alpha = entropy_params[0] if entropy_params else 2.0
-        uniform = th.ones_like(logits) / num_classes
-        divergence = get_loss("RenyiDivergence", param=[0, alpha], nclass=num_classes,
-                            softmax_logits=True, softmax_gt=False)
-        # Rényi entropy is related to divergence from uniform
-        return -divergence(logits, uniform)
+        probs = F.softmax(logits, dim=-1)
+        if abs(alpha - 1.0) < 1e-6:
+            # Use Shannon entropy for α ≈ 1
+            log_probs = F.log_softmax(logits, dim=-1)
+            return -(probs * log_probs).sum(dim=-1)
+        else:
+            # Rényi entropy: (1/(1-α)) * log(sum(p^α))
+            return th.log((probs.pow(alpha)).sum(dim=-1)) / (1.0 - alpha)
     
     elif entropy_type == "collision":
         # Collision entropy (Rényi entropy with α=2)
         probs = F.softmax(logits, dim=-1)
         collision_prob = (probs * probs).sum(dim=-1)
-        return -th.log(collision_prob)
+        return -th.log(collision_prob + 1e-10)  # Add small epsilon for stability
     
     elif entropy_type == "min":
         # Min-entropy (Rényi entropy with α→∞)
         probs = F.softmax(logits, dim=-1)
         max_prob = probs.max(dim=-1)[0]
-        return -th.log(max_prob)
+        return -th.log(max_prob + 1e-10)  # Add small epsilon for stability
     
     elif entropy_type == "gini":
         # Gini impurity (1 - sum of squared probabilities)
@@ -100,7 +101,7 @@ def compute_entropy_loss(logits, entropy_type, entropy_params=None, num_classes=
         # Exponential entropy
         beta = entropy_params[0] if entropy_params else 1.0
         probs = F.softmax(logits, dim=-1)
-        return -th.log((probs * th.exp(beta * probs)).sum(dim=-1)) / beta
+        return -th.log((probs * th.exp(beta * probs)).sum(dim=-1) + 1e-10) / beta
     
     elif entropy_type == "diversity":
         # Diversity index based on Simpson's index
@@ -110,15 +111,21 @@ def compute_entropy_loss(logits, entropy_type, entropy_params=None, num_classes=
     
     elif entropy_type == "uniform_kl":
         # KL divergence from uniform (encourages uniform distribution)
-        uniform = th.ones_like(logits) / num_classes
-        kl_div = get_loss("KL", nclass=num_classes, softmax_logits=True, softmax_gt=False)
-        return -kl_div(logits, uniform)  # Negative because we want to minimize distance to uniform
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        uniform_log_prob = -np.log(num_classes)
+        # KL(p||u) = sum(p * (log(p) - log(u)))
+        kl = (probs * (log_probs - uniform_log_prob)).sum(dim=-1)
+        return -kl  # Negative because we want to minimize distance to uniform
     
     elif entropy_type == "bhattacharyya":
         # Bhattacharyya distance from uniform
-        uniform = th.ones_like(logits) / num_classes
-        bhatt = get_loss("Bhattacharyya", nclass=num_classes, softmax_logits=True, softmax_gt=False)
-        return -bhatt(logits, uniform)
+        probs = F.softmax(logits, dim=-1)
+        uniform_prob = 1.0 / num_classes
+        # BC coefficient = sum(sqrt(p * u))
+        bc = th.sqrt(probs * uniform_prob).sum(dim=-1)
+        # Bhattacharyya distance = -ln(BC)
+        return th.log(bc + 1e-10)  # Positive because we want to maximize BC
     
     else:
         raise ValueError(f"Unknown entropy type: {entropy_type}")
@@ -340,14 +347,13 @@ def create_argparser():
         log_dir="",
         entropy_constraint_loss_weight=0.1,
         entropy_type="shannon",  # New parameter for entropy type
-        entropy_params=None,  # New parameter for entropy-specific parameters
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
     
     # Add custom argument parsing for entropy_params
-    parser.add_argument('--entropy_params', type=float, nargs='*', 
+    parser.add_argument('--entropy_params', type=float, nargs='*', default=None,
                        help='Parameters for entropy function (e.g., alpha for Tsallis/Renyi)')
     
     return parser
