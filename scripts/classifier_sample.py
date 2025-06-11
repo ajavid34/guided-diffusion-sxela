@@ -54,25 +54,25 @@ def compute_entropy(probs, entropy_type='renyi', alpha=2.0):
         return -th.log((probs ** 2).sum(dim=-1))
 
     elif entropy_type == 'js':
-    # JS divergence from uniform
-    num_classes = probs.shape[-1]
-    uniform_prob = 1.0 / num_classes
-    
-    # Mixture distribution: m = (p + u) / 2
-    mixture = 0.5 * (probs + uniform_prob)
-    
-    # JS divergence components
-    # Note: For entropy regularization, we use negative JS divergence
-    # so that maximizing entropy corresponds to minimizing distance from uniform
-    kl_p_m = (probs * (th.log(probs) - th.log(mixture))).sum(dim=-1)
-    kl_u_m = uniform_prob * num_classes * (th.log(th.tensor(uniform_prob)) - th.log(mixture).sum(dim=-1) / num_classes)
-    
-    # JS divergence
-    js_div = 0.5 * (kl_p_m + kl_u_m)
-    
-    # Return negative JS divergence so it behaves like entropy
-    # (higher value = more uniform = more entropy)
-    return -js_div
+        # JS divergence from uniform
+        num_classes = probs.shape[-1]
+        uniform_prob = 1.0 / num_classes
+        
+        # Mixture distribution: m = (p + u) / 2
+        mixture = 0.5 * (probs + uniform_prob)
+        
+        # JS divergence components
+        # Note: For entropy regularization, we use negative JS divergence
+        # so that maximizing entropy corresponds to minimizing distance from uniform
+        kl_p_m = (probs * (th.log(probs) - th.log(mixture))).sum(dim=-1)
+        kl_u_m = uniform_prob * num_classes * (th.log(th.tensor(uniform_prob)) - th.log(mixture).sum(dim=-1) / num_classes)
+        
+        # JS divergence
+        js_div = 0.5 * (kl_p_m + kl_u_m)
+        
+        # Return negative JS divergence so it behaves like entropy
+        # (higher value = more uniform = more entropy)
+        return -js_div
     
     else:
         # Default to Shannon entropy
