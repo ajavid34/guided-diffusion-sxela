@@ -127,6 +127,26 @@ def compute_entropy_loss(logits, entropy_type, entropy_params=None, num_classes=
         # Bhattacharyya distance = -ln(BC)
         return th.log(bc + 1e-10)  # Positive because we want to maximize BC
     
+    elif entropy_type == "js":
+        # Jensen-Shannon divergence from uniform
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        
+        # Uniform distribution
+        uniform_prob = 1.0 / num_classes
+        uniform_log_prob = -np.log(num_classes)
+        
+        # Mixture distribution: m = (p + u) / 2
+        mixture = 0.5 * (probs + uniform_prob)
+        log_mixture = th.log(mixture + 1e-10)
+        
+        # JS divergence = 0.5 * [KL(p||m) + KL(u||m)]
+        kl_p_m = (probs * (log_probs - log_mixture)).sum(dim=-1)
+        kl_u_m = uniform_prob * num_classes * (uniform_log_prob - th.log(mixture + 1e-10).sum(dim=-1) / num_classes)
+        
+        js_div = 0.5 * (kl_p_m + kl_u_m)
+        return -js_div  # Negative because we want to minimize distance to uniform
+    
     else:
         raise ValueError(f"Unknown entropy type: {entropy_type}")
 
