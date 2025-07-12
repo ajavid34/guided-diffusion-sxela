@@ -392,7 +392,7 @@ def create_argparser():
     parser.add_argument('--use-ece', action='store_true',
                         help='Use Expected Calibration Error loss')
 
-    parser.add_argument('--ece-loss-type', type=str, default='ECE', choices=['ECE', 'TCCG', 'DECE'],
+    parser.add_argument('--ece-loss-type', type=str, default='ECE', choices=['ECE', 'TCCG', 'DECE', "ECE_SQRT"],
                         help='Type of calibration loss to use. Options: ECE, TCCG, DECE')
 
     parser.add_argument('--ece-loss-weight', type=float, default=0.1,

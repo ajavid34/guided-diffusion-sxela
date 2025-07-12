@@ -513,7 +513,7 @@ class ECE_SQRT(BaseDivergence):
 class ECE(BaseDivergence):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        targets_1 = targets.detach.clone()
+        targets_1 = targets.detach().clone()
         logits, targets = self.prepare_inputs(logits, targets)
         prob_values, predictions = torch.max(logits, dim=1)
         acc = predictions.eq(targets_1)
@@ -535,7 +535,7 @@ class ECE(BaseDivergence):
 class TCCG(BaseDivergence):
     """Hinge-style loss to penalize small gaps between true class and best wrong class"""
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        targets_1 = targets.detach.clone()
+        targets_1 = targets.detach().clone()
         logits, targets = self.prepare_inputs(logits, targets)
         true_class_prob = (logits * targets).sum(dim=1)
         modified = logits.clone()
