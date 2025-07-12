@@ -495,6 +495,68 @@ class SinkhornDistance(BaseDivergence):
         cdf_targets = torch.cumsum(targets, dim=1)
         return torch.abs(cdf_logits - cdf_targets).sum(dim=1).mean()
 # Dictionary-based factory defined at module level for efficiency
+
+
+class ECE_SQRT(BaseDivergence):
+    """ECE_SQRT Divergence"""
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        logits, targets = self.prepare_inputs(logits, targets)
+        logits_orgins = torch.log(logits.clamp(min=1e-12))
+        T = self.param[0] if self.param else 5.0
+        softmax_T = F.softmax(logits_orgins / T, dim=1)
+        soft_1  = F.softmax(logits_orgins, dim=1)
+        sum1 = torch.sum(soft_1 * targets, dim=1)
+        sumT = torch.sum(softmax_T, dim=1)
+        loss = torch.mean(torch.abs(sum1 - sumT))
+        return loss
+
+class ECE(BaseDivergence):
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets_1 = targets.detach.clone()
+        logits, targets = self.prepare_inputs(logits, targets)
+        prob_values, predictions = torch.max(logits, dim=1)
+        acc = predictions.eq(targets_1)
+
+        ece = torch.zeros(1, device=logits.device)
+
+        bin_steps = self.param[0] if self.param else 10
+        bins = torch.linspace(0,1, steps=bin_steps + 1, device= targets.device)
+        boundaries = zip(bins[:-1], bins[1:])
+        for start, end in boundaries:
+            indexes = (prob_values > start) & (prob_values <= end)
+            acc_bin = acc[indexes].float().mean()
+            avg_conf = prob_values[indexes].mean()
+            ece += torch.abs(avg_conf - acc_bin) * indexes.float().mean()
+
+
+        return ece
+
+class TCCG(BaseDivergence):
+    """Hinge-style loss to penalize small gaps between true class and best wrong class"""
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets_1 = targets.detach.clone()
+        logits, targets = self.prepare_inputs(logits, targets)
+        true_class_prob = (logits * targets).sum(dim=1)
+        modified = logits.clone()
+        modified[torch.arange(logits.size(0)), targets_1] = -1
+        best_w_p = modified.max(dim=1)[0]
+        #margin = self.param[0] if self.param else 0
+        loss = F.relu(best_wrong_probs - true_class_probs)
+        return loss.mean()
+
+
+
+
+
+
+
+
+
+
+
+
 _LOSS_CLASSES = {
     "KL": KL,
     "TV": TV,
@@ -523,6 +585,9 @@ _LOSS_CLASSES = {
 "EnergyDistance": EnergyDistance,
 "MMD": MMD,
 "SinkhornDistance": SinkhornDistance,
+    "ECE":ECE,
+    "ECE_SQRT":ECE_SQRT,
+    "TCCG":TCCG,
 }
 
 
