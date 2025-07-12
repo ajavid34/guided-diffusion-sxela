@@ -279,6 +279,7 @@ def main():
                 ece_loss_fn = get_loss(args.ece_loss_type,
                                        nclass=NUM_CLASSES)
                 ece_loss = args.ece_loss_weight * ece_loss_fn(logits, sub_labels)
+                print(ece_loss)
                 losses[f"{prefix}_ece_loss"] = ece_loss.detach()
                 loss += ece_loss
 
