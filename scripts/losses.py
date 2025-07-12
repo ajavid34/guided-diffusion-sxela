@@ -507,7 +507,7 @@ class ECE_SQRT(BaseDivergence):
         soft_1  = F.softmax(logits_orgins, dim=1)
         sum1 = torch.sum(soft_1 * targets, dim=1)
         sumT = torch.sum(softmax_T, dim=1)
-        loss = torch.mean(torch.abs(sum1 - sumT))
+        loss = (torch.abs(sum1 - sumT))
         return loss
 
 class ECE(BaseDivergence):
