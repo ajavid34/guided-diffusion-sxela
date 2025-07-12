@@ -502,7 +502,7 @@ class ECE_SQRT(BaseDivergence):
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         logits, targets = self.prepare_inputs(logits, targets)
         logits_orgins = torch.log(logits.clamp(min=1e-12))
-        T = self.param[0] if self.param else 5.0
+        T = self.param[0] if self.param else 0.1
         softmax_T = F.softmax(logits_orgins / T, dim=1)
         soft_1  = F.softmax(logits_orgins, dim=1)
         sum1 = torch.sum(soft_1 * targets, dim=1)
