@@ -283,15 +283,9 @@ def main():
                 losses[f"{prefix}_ece_loss"] = ece_loss.detach()
                 loss += ece_loss
 
-
-
-
-
-
-
-
-            log_loss_dict(diffusion, sub_t, losses)
             print(losses)
+            log_loss_dict(diffusion, sub_t, losses)
+
             del losses
 
             loss = loss.mean()
