@@ -275,6 +275,7 @@ def main():
             losses[f"{prefix}_raw_entropy"] = entropy.detach()  # Log raw entropy value
             loss = ce_loss + entropy_constraint_loss
             if args.use_ece:
+                print("hi")
                 ece_loss_fn = get_loss(args.ece_loss_type,
                                        nclass=args.num_classes)
                 ece_loss = args.ece_loss_weight * ece_loss_fn(logits, sub_labels)
