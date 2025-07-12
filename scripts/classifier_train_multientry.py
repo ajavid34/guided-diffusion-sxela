@@ -291,6 +291,7 @@ def main():
 
 
             log_loss_dict(diffusion, sub_t, losses)
+            print(losses)
             del losses
 
             loss = loss.mean()
