@@ -150,7 +150,7 @@ def compute_entropy_loss(logits, entropy_type, entropy_params=None, num_classes=
     else:
         raise ValueError(f"Unknown entropy type: {entropy_type}")
 
-
+from losses import get_loss
 def main():
     args = create_argparser().parse_args()
 
@@ -273,8 +273,21 @@ def main():
             entropy_constraint_loss = args.entropy_constraint_loss_weight * entropy
             losses[f"{prefix}_entropy_constraint_loss"] = entropy_constraint_loss.detach()
             losses[f"{prefix}_raw_entropy"] = entropy.detach()  # Log raw entropy value
-
             loss = ce_loss + entropy_constraint_loss
+            if args.use_ece:
+                ece_loss_fn = get_loss(args.ece_loss_type,
+                                       nclass=args.num_classes)
+                ece_loss = args.ece_loss_weight * ece_loss_fn(logits, sub_labels)
+                losses[f"{prefix}_ece_loss"] = ece_loss.detach()
+                loss += ece_loss
+
+
+
+
+
+
+
+
             log_loss_dict(diffusion, sub_t, losses)
             del losses
 
@@ -375,7 +388,15 @@ def create_argparser():
     # Add custom argument parsing for entropy_params
     parser.add_argument('--entropy_params', type=float, nargs='*', default=None,
                        help='Parameters for entropy function (e.g., alpha for Tsallis/Renyi)')
-    
+    parser.add_argument('--use-ece', action='store_true',
+                        help='Use Expected Calibration Error loss')
+
+    parser.add_argument('--ece-loss-type', type=str, default='ECE', choices=['ECE', 'TCCG', 'DECE'],
+                        help='Type of calibration loss to use. Options: ECE, TCCG, DECE')
+
+    parser.add_argument('--ece-loss-weight', type=float, default=0.1,
+                        help='Weight for the ECE loss term in the total loss')
+
     return parser
 
 
