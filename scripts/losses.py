@@ -532,6 +532,8 @@ class ECE(BaseDivergence):
 
             acc_bin = acc[indexes].float()
             avg_conf = prob_values[indexes]
+            print("shape")
+            print(acc_bin.shape, avg_conf.shape)
 
             ece += torch.abs(avg_conf - acc_bin) * indexes.float()
 
