@@ -513,12 +513,13 @@ class ECE_SQRT(BaseDivergence):
 class ECE(BaseDivergence):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        print(logits.shape, targets.shape)
         targets_1 = targets.detach().clone()
         logits, targets = self.prepare_inputs(logits, targets)
         prob_values, predictions = torch.max(logits, dim=1)
         acc = predictions.eq(targets_1)
 
-        ece = torch.zeros(1, device=logits.device)
+        ece = torch.zeros(logits.shape[0], device=logits.device)
 
         bin_steps = self.param[0] if self.param else 10
         bins = torch.linspace(0,1, steps=bin_steps + 1, device= targets.device)
