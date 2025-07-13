@@ -551,7 +551,7 @@ class TCCG(BaseDivergence):
         best_w_p = modified.max(dim=1)[0]
         #margin = self.param[0] if self.param else 0
         loss = F.relu(best_w_p - true_class_prob)
-        return loss.mean()
+        return loss
 
 
 
