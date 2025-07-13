@@ -495,6 +495,12 @@ class SinkhornDistance(BaseDivergence):
         cdf_targets = torch.cumsum(targets, dim=1)
         return torch.abs(cdf_logits - cdf_targets).sum(dim=1).mean()
 # Dictionary-based factory defined at module level for efficiency
+def smooth_abs(x, beta=0.01):
+    return torch.sqrt(x ** 2 + beta)
+
+def soft_abs(x, beta=10):
+    return (1/beta) * torch.log(1 + torch.exp(beta * x)) + (1/beta) * torch.log(1 + torch.exp(-beta * x))
+
 
 class ECE_SQRT(BaseDivergence):
     """ECE_SQRT Divergence"""
@@ -509,6 +515,7 @@ class ECE_SQRT(BaseDivergence):
         sumT = torch.sum(softmax_T, dim=1)
         loss = (torch.abs(sum1 - sumT))
         return loss
+
 
 class ECE(BaseDivergence):
 
@@ -528,8 +535,8 @@ class ECE(BaseDivergence):
 
             acc_bin = acc[indexes].float()
             avg_conf = prob_values[indexes]
-            ece[indexes] = torch.abs(avg_conf - acc_bin)
-
+            #ece[indexes] = torch.abs(avg_conf - acc_bin)
+            ece[indexes] = smooth_abs(avg_conf - acc_bin)
 
         return ece
 
