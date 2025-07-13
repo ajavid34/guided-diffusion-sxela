@@ -525,6 +525,8 @@ class ECE(BaseDivergence):
         boundaries = zip(bins[:-1], bins[1:])
         for start, end in boundaries:
             indexes = (prob_values > start) & (prob_values <= end)
+            print(indexes.shape, acc.shape, prob_values.shape)
+
             acc_bin = acc[indexes].float().mean(dim=1)
             avg_conf = prob_values[indexes].mean(dim=1)
 
