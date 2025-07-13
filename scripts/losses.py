@@ -550,7 +550,7 @@ class TCCG(BaseDivergence):
         modified[torch.arange(logits.size(0)), targets_1] = -1
         best_w_p = modified.max(dim=1)[0]
         #margin = self.param[0] if self.param else 0
-        loss = F.relu(best_wrong_probs - true_class_probs)
+        loss = F.relu(best_w_p - true_class_probs)
         return loss.mean()
 
 
