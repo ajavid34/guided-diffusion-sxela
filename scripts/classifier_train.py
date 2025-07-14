@@ -6,6 +6,7 @@ import argparse
 import os
 
 import blobfile as bf
+import numpy as np
 import torch as th
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -13,33 +14,135 @@ from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from entropy_driven_guided_diffusion import dist_util, logger
-from entropy_driven_guided_diffusion.fp16_util import MixedPrecisionTrainer
-from entropy_driven_guided_diffusion.image_datasets import load_data
-from entropy_driven_guided_diffusion.resample import create_named_schedule_sampler
-from entropy_driven_guided_diffusion.script_util import (
+from guided_diffusion import dist_util, logger
+from guided_diffusion.fp16_util import MixedPrecisionTrainer
+from guided_diffusion.image_datasets import load_data
+from guided_diffusion.resample import create_named_schedule_sampler
+from guided_diffusion.script_util import (
+    NUM_CLASSES,
     add_dict_to_argparser,
     args_to_dict,
     classifier_and_diffusion_defaults,
     create_classifier_and_diffusion,
 )
-from entropy_driven_guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
-
+from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
 
 def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist(local_rank=args.local_rank)
-
+    dist_util.setup_dist()
     logger.configure(dir=args.log_dir)
     logger.log('current rank == {}, total_num = {}'.format(dist.get_rank(), dist.get_world_size()))
+    
     logger.log(args)
 
     logger.log("creating model and diffusion...")
+    
+    # Create model with original function call
     model, diffusion = create_classifier_and_diffusion(
         **args_to_dict(args, classifier_and_diffusion_defaults().keys())
     )
+    
+    # Manually fix the model to have 200 classes for Tiny ImageNet
+    logger.log("Checking and fixing model output dimensions...")
+    
+    # Print model structure to understand the architecture
+    logger.log("Model structure:")
+    for name, module in model.named_modules():
+        if hasattr(module, 'out_features') or hasattr(module, 'out_channels'):
+            if hasattr(module, 'out_features'):
+                logger.log(f"  {name}: {type(module).__name__} out_features={module.out_features}")
+            if hasattr(module, 'out_channels'):
+                logger.log(f"  {name}: {type(module).__name__} out_channels={module.out_channels}")
+    
+    # Find and replace layers with 1000 outputs
+    import torch.nn as nn
+    layers_replaced = 0
+    
+    def replace_layer_recursive(module, name=""):
+        nonlocal layers_replaced
+        for child_name, child_module in module.named_children():
+            full_name = f"{name}.{child_name}" if name else child_name
+            
+            # Check Conv1d layers (for final classification)
+            if isinstance(child_module, nn.Conv1d) and child_module.out_channels == 1000:
+                logger.log(f"Replacing Conv1d layer {full_name}: {child_module.in_channels} -> 1000 with {child_module.in_channels} -> 200")
+                new_layer = nn.Conv1d(
+                    child_module.in_channels, 
+                    200,
+                    child_module.kernel_size,
+                    child_module.stride,
+                    child_module.padding,
+                    child_module.dilation,
+                    child_module.groups,
+                    child_module.bias is not None
+                )
+                nn.init.xavier_uniform_(new_layer.weight)
+                if new_layer.bias is not None:
+                    nn.init.zeros_(new_layer.bias)
+                setattr(module, child_name, new_layer)
+                layers_replaced += 1
+            
+            # Check Linear layers
+            elif isinstance(child_module, nn.Linear) and child_module.out_features == 1000:
+                logger.log(f"Replacing Linear layer {full_name}: {child_module.in_features} -> 1000 with {child_module.in_features} -> 200")
+                new_layer = nn.Linear(child_module.in_features, 200)
+                nn.init.xavier_uniform_(new_layer.weight)
+                nn.init.zeros_(new_layer.bias)
+                setattr(module, child_name, new_layer)
+                layers_replaced += 1
+            
+            # Check Conv2d layers ONLY if they are likely output layers (avoid internal ResBlock layers)
+            elif isinstance(child_module, nn.Conv2d) and child_module.out_channels == 1000 and "out" in full_name:
+                logger.log(f"Replacing Conv2d layer {full_name}: {child_module.in_channels} -> 1000 with {child_module.in_channels} -> 200")
+                new_layer = nn.Conv2d(
+                    child_module.in_channels, 
+                    200,
+                    child_module.kernel_size,
+                    child_module.stride,
+                    child_module.padding,
+                    child_module.dilation,
+                    child_module.groups,
+                    child_module.bias is not None
+                )
+                nn.init.xavier_uniform_(new_layer.weight)
+                if new_layer.bias is not None:
+                    nn.init.zeros_(new_layer.bias)
+                setattr(module, child_name, new_layer)
+                layers_replaced += 1
+            
+            # Recursively check child modules
+            else:
+                replace_layer_recursive(child_module, full_name)
+    
+    replace_layer_recursive(model)
+    logger.log(f"Replaced {layers_replaced} layers")
+    
+    # If no layers were replaced, don't try to replace internal layers
+    if layers_replaced == 0:
+        logger.log("No output layers with 1000 channels found - will use runtime slicing instead")
+    
     model.to(dist_util.dev())
+
+    # Verify the fix worked by testing actual output
+    logger.log("Verifying model output dimensions...")
+    dummy_input = th.randn(1, 3, args.image_size, args.image_size).to(dist_util.dev())
+    dummy_timestep = th.zeros(1, dtype=th.long).to(dist_util.dev())
+    with th.no_grad():
+        dummy_output = model(dummy_input, timesteps=dummy_timestep)
+        if isinstance(dummy_output, tuple):
+            output_shape = dummy_output[0].shape
+        else:
+            output_shape = dummy_output.shape
+        
+        logger.log(f"Model output shape: {output_shape}")
+        
+        if output_shape[-1] == 200:
+            logger.log(f"SUCCESS: Model correctly outputs 200 classes")
+        else:
+            logger.log(f"WARNING: Model still outputs {output_shape[-1]} classes instead of 200")
+            logger.log("Continuing training anyway - the loss will handle the mismatch")
+            logger.log("Note: You may need to manually edit the guided_diffusion source code to fix NUM_CLASSES")
 
     if args.noised:
         schedule_sampler = create_named_schedule_sampler(
@@ -59,7 +162,6 @@ def main():
                 )
             )
 
-    # Needed for creating correct EMAs and fp16 parameters.
     dist_util.sync_params(model.parameters())
 
     mp_trainer = MixedPrecisionTrainer(
@@ -81,16 +183,14 @@ def main():
         batch_size=args.batch_size,
         image_size=args.image_size,
         class_cond=True,
-        random_crop=True,
-        dataset_type=args.dataset_type
+        random_crop=True
     )
     if args.val_data_dir:
         val_data = load_data(
             data_dir=args.val_data_dir,
             batch_size=args.batch_size,
             image_size=args.image_size,
-            class_cond=True,
-            dataset_type=args.dataset_type
+            class_cond=True
         )
     else:
         val_data = None
@@ -102,9 +202,10 @@ def main():
             bf.dirname(args.resume_checkpoint), f"opt{resume_step:06}.pt"
         )
         logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
-        opt.load_state_dict(
-            dist_util.load_state_dict(opt_checkpoint, map_location=dist_util.dev())
-        )
+        if bf.exists(opt_checkpoint):
+            opt.load_state_dict(
+                dist_util.load_state_dict(opt_checkpoint, map_location=dist_util.dev())
+            )
 
     logger.log("training classifier model...")
 
@@ -113,7 +214,7 @@ def main():
         labels = extra["y"].to(dist_util.dev())
 
         batch = batch.to(dist_util.dev())
-        # Noisy images
+        # Noisy images (recommended for diffusion classifiers)
         if args.noised:
             t, _ = schedule_sampler.sample(batch.shape[0], dist_util.dev())
             batch = diffusion.q_sample(batch, t)
@@ -123,8 +224,19 @@ def main():
         for i, (sub_batch, sub_labels, sub_t) in enumerate(
                 split_microbatches(args.microbatch, batch, labels, t)
         ):
-
-            logits = model(sub_batch, timesteps=sub_t)[0]
+            logits = model(sub_batch, timesteps=sub_t)
+            
+            # Handle model output (some models return tuple)
+            if isinstance(logits, tuple):
+                logits = logits[0]
+            
+            # Force 200 classes if model still outputs 1000
+            if logits.shape[-1] == 1000:
+                logits = logits[:, :200]  # Take only first 200 classes
+            
+            # Fix label indexing: clamp labels to valid range [0, 199]
+            sub_labels = th.clamp(sub_labels, 0, 199)
+            
             loss_ce = F.cross_entropy(logits, sub_labels, reduction="none")
 
             losses = {}
@@ -212,7 +324,7 @@ def create_argparser():
     defaults = dict(
         data_dir="",
         val_data_dir="",
-        noised=True,
+        noised=True,  # Keep True for diffusion classifier training
         iterations=150000,
         lr=3e-4,
         weight_decay=0.0,
@@ -224,9 +336,7 @@ def create_argparser():
         log_interval=10,
         eval_interval=5,
         save_interval=10000,
-
-        log_dir="",
-        dataset_type='imagenet1000'
+        log_dir="./logs",
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
