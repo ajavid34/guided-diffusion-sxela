@@ -11,36 +11,31 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from tqdm import tqdm
 
-from entropy_driven_guided_diffusion import dist_util, logger
-from entropy_driven_guided_diffusion.fp16_util import MixedPrecisionTrainer
-from entropy_driven_guided_diffusion.image_datasets import load_data
-from entropy_driven_guided_diffusion.resample import create_named_schedule_sampler
-from entropy_driven_guided_diffusion.script_util import (
+from guided_diffusion import dist_util, logger
+from guided_diffusion.fp16_util import MixedPrecisionTrainer
+from guided_diffusion.image_datasets import load_data
+from guided_diffusion.resample import create_named_schedule_sampler
+from guided_diffusion.script_util import (
     add_dict_to_argparser,
     args_to_dict,
     classifier_and_diffusion_defaults,
     create_classifier_and_diffusion,
 )
-from entropy_driven_guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
+from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
 
 
 def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist(local_rank=args.local_rank)
-
-    logger.configure(dir=args.log_dir)
-    logger.log('current rank == {}, total_num = {}'.format(dist.get_rank(), dist.get_world_size()))
-    logger.log(args)
+    dist_util.setup_dist()
+    logger.configure()
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_classifier_and_diffusion(
         **args_to_dict(args, classifier_and_diffusion_defaults().keys())
     )
     model.to(dist_util.dev())
-
     if args.noised:
         schedule_sampler = create_named_schedule_sampler(
             args.schedule_sampler, diffusion
@@ -82,7 +77,6 @@ def main():
         image_size=args.image_size,
         class_cond=True,
         random_crop=True,
-        dataset_type=args.dataset_type
     )
     if args.val_data_dir:
         val_data = load_data(
@@ -90,7 +84,6 @@ def main():
             batch_size=args.batch_size,
             image_size=args.image_size,
             class_cond=True,
-            dataset_type=args.dataset_type
         )
     else:
         val_data = None
@@ -121,14 +114,13 @@ def main():
             t = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
 
         for i, (sub_batch, sub_labels, sub_t) in enumerate(
-                split_microbatches(args.microbatch, batch, labels, t)
+            split_microbatches(args.microbatch, batch, labels, t)
         ):
-
-            logits = model(sub_batch, timesteps=sub_t)[0]
-            loss_ce = F.cross_entropy(logits, sub_labels, reduction="none")
+            logits = model(sub_batch, timesteps=sub_t)
+            loss = F.cross_entropy(logits, sub_labels, reduction="none")
 
             losses = {}
-            losses[f"{prefix}_loss_ce"] = loss_ce.detach()
+            losses[f"{prefix}_loss"] = loss.detach()
             losses[f"{prefix}_acc@1"] = compute_top_k(
                 logits, sub_labels, k=1, reduction="none"
             )
@@ -137,14 +129,13 @@ def main():
             )
             log_loss_dict(diffusion, sub_t, losses)
             del losses
-            loss = loss_ce
             loss = loss.mean()
             if loss.requires_grad:
                 if i == 0:
                     mp_trainer.zero_grad()
                 mp_trainer.backward(loss * len(sub_batch) / len(batch))
 
-    for step in tqdm(range(args.iterations - resume_step)):
+    for step in range(args.iterations - resume_step):
         logger.logkv("step", step + resume_step)
         logger.logkv(
             "samples",
@@ -163,9 +154,9 @@ def main():
         if not step % args.log_interval:
             logger.dumpkvs()
         if (
-                step
-                and dist.get_rank() == 0
-                and not (step + resume_step) % args.save_interval
+            step
+            and dist.get_rank() == 0
+            and not (step + resume_step) % args.save_interval
         ):
             logger.log("saving model...")
             save_model(mp_trainer, opt, step + resume_step)
@@ -205,7 +196,7 @@ def split_microbatches(microbatch, *args):
         yield tuple(args)
     else:
         for i in range(0, bs, microbatch):
-            yield tuple(x[i: i + microbatch] if x is not None else None for x in args)
+            yield tuple(x[i : i + microbatch] if x is not None else None for x in args)
 
 
 def create_argparser():
@@ -224,13 +215,9 @@ def create_argparser():
         log_interval=10,
         eval_interval=5,
         save_interval=10000,
-
-        log_dir="",
-        dataset_type='imagenet1000'
     )
     defaults.update(classifier_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", type=int, default=0)
     add_dict_to_argparser(parser, defaults)
     return parser
 
